@@ -9,10 +9,13 @@ else
   aws s3 mv "s3://${BUCKET_NAME}/${REPO}/latest" "s3://${BUCKET_NAME}/${REPO}/$(date +%F-%H-%M-%S-%N)" --recursive
 
   # install packages required for update script
+  sudo apt update
   for DEP in $(cat required_packages); do
-    yum -y install "${DEP}"
+    sudo apt install --no-install-recommends --no-install-suggests -y "${DEP}"
   done
-  make readsb
+  export DEB_BUILD_OPTIONS=noddebs
+  dpkg-buildpackage -b -Prtlsdr -ui -uc -us
+  sudo dpkg -i ../readsb_*.deb
 
   # push updated db folder to S3
   aws s3 cp readsb "s3://${BUCKET_NAME}/${REPO}/latest/" --recursive
