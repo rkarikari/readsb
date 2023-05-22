@@ -18,5 +18,6 @@ else
   sudo dpkg -i ../readsb_*.deb
 
   # push updated db folder to S3
-  aws s3 cp ./debian/readsb/usr/bin/* "s3://${BUCKET_NAME}/${REPO}/latest/" --recursive
+  ls -lart ./debian/readsb/usr/bin/*
+  aws s3 cp ./debian/readsb/usr/bin/* "s3://${BUCKET_NAME}/${REPO}/latest/"
 fi
