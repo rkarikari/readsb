@@ -9,10 +9,9 @@ else
   aws s3 mv "s3://${BUCKET_NAME}/${REPO}/latest" "s3://${BUCKET_NAME}/${REPO}/$(date +%F-%H-%M-%S-%N)" --recursive
 
   # install packages required for update script
-  yum -y install gcc
-  yum -y install make
-  chmod +x required_packages
-  ./required_packages
+  for DEP in $(cat required_packages); do
+    yum -y install "${DEP}"
+  done
   make readsb
 
   # push updated db folder to S3
