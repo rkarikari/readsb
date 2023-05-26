@@ -64,6 +64,8 @@ bool bladeRFHandleOption(int argc, char *argv) {
                 BladeRF.lpf_bandwidth = atoi(argv);
             }
             break;
+        default:
+            return false;
     }
     return true;
 }
@@ -483,9 +485,8 @@ out:
 
 void bladeRFClose() {
     if (BladeRF.converter) {
-        cleanup_converter(BladeRF.converter_state);
+        cleanup_converter(&BladeRF.converter_state);
         BladeRF.converter = NULL;
-        BladeRF.converter_state = NULL;
     }
 
     if (BladeRF.device) {

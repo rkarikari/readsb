@@ -385,17 +385,21 @@ static int findInCircle(struct apiEntry *haystack, int haylen, struct apiOptions
                     double dist = greatcircle(lat, lon, e->bin.lat / 1E6, e->bin.lon / 1E6, 0);
                     if (dist < radius && dist < minDistance) {
                         // first match is overwritten repeatedly
-                        matches[count] = *e;
-                        *alloc += e->jsonOffset.len;
-                        matches[count].distance = (float) dist;
+                        matches[0] = *e;
+                        matches[0].distance = (float) dist;
                         minDistance = dist;
                         found = true;
                     }
                 }
             }
         }
-        if (found)
+        if (found) {
+            // calculate bearing for (the only) match
+            struct apiEntry *e = &matches[0];
+            *alloc += e->jsonOffset.len;
+            e->direction = (float) bearing(lat, lon, e->bin.lat / 1E6, e->bin.lon / 1E6);
             count = 1;
+        }
     }
     if (!onlyClosest) {
         for (int k = 0; k < 2; k++) {
@@ -1120,7 +1124,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
         if (value) {
             //fprintf(stderr, "%s=%s\n", option, value);
             // handle parameters WITH associated value
-            if (byteMatch0(option, "box")) {
+            if (byteMatchStrict(option, "box")) {
                 options->is_box = 1;
 
                 double *box = options->box;
@@ -1135,9 +1139,9 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                 if (box[0] > box[1])
                     return invalid;
 
-            } else if (byteMatch0(option, "closest") || byteMatch0(option, "circle")) {
+            } else if (byteMatchStrict(option, "closest") || byteMatchStrict(option, "circle")) {
                 options->is_circle = 1;
-                if (byteMatch0(option, "closest")) {
+                if (byteMatchStrict(option, "closest")) {
                     options->closest = 1;
                 }
                 struct apiCircle *circle = &options->circle;
@@ -1160,7 +1164,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                 if (circle->lon > 180 || circle->lon < -180)
                     return invalid;
 
-            } else if (byteMatch0(option, "find_hex") || byteMatch0(option, "hexlist")) {
+            } else if (byteMatchStrict(option, "find_hex") || byteMatchStrict(option, "hexlist")) {
                 options->is_hexList = 1;
 
                 int hexCount = 0;
@@ -1187,7 +1191,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                 }
 
                 options->hexCount = hexCount;
-            } else if (byteMatch0(option, "find_callsign")) {
+            } else if (byteMatchStrict(option, "find_callsign")) {
                 options->is_callsignList = 1;
 
                 int callsignCount = 0;
@@ -1207,7 +1211,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                     return invalid;
 
                 options->callsignCount = callsignCount;
-            } else if (byteMatch0(option, "find_reg")) {
+            } else if (byteMatchStrict(option, "find_reg")) {
                 options->is_regList = 1;
 
                 int regCount = 0;
@@ -1227,8 +1231,8 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                     return invalid;
 
                 options->regCount = regCount;
-            } else if (byteMatch0(option, "find_type") || byteMatch0(option, "filter_type")) {
-                if (byteMatch0(option, "find_type")) {
+            } else if (byteMatchStrict(option, "find_type") || byteMatchStrict(option, "filter_type")) {
+                if (byteMatchStrict(option, "find_type")) {
                     options->is_typeList = 1;
                 } else {
                     options->filter_typeList = 1;
@@ -1251,27 +1255,27 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                     return invalid;
 
                 options->typeCount = typeCount;
-            } else if (byteMatch0(option, "filter_callsign_exact")) {
+            } else if (byteMatchStrict(option, "filter_callsign_exact")) {
 
                 options->filter_callsign_exact = 1;
 
                 memset(options->callsign_exact, 0x0, sizeof(options->callsign_exact));
                 strncpy(options->callsign_exact, value, 8);
 
-            } else if (byteMatch0(option, "filter_callsign_prefix")) {
+            } else if (byteMatchStrict(option, "filter_callsign_prefix")) {
 
                 options->filter_callsign_prefix = 1;
 
                 memset(options->callsign_prefix, 0x0, sizeof(options->callsign_prefix));
                 strncpy(options->callsign_prefix, value, 8);
 
-            } else if (byteMatch0(option, "above_alt_baro")) {
+            } else if (byteMatchStrict(option, "above_alt_baro")) {
                 options->filter_alt_baro = 1;
                 options->above_alt_baro = strtol(value, NULL, 10);
-            } else if (byteMatch0(option, "below_alt_baro")) {
+            } else if (byteMatchStrict(option, "below_alt_baro")) {
                 options->filter_alt_baro = 1;
                 options->below_alt_baro = strtol(value, NULL, 10);
-            } else if (byteMatch0(option, "filter_squawk")) {
+            } else if (byteMatchStrict(option, "filter_squawk")) {
                 options->filter_squawk = 1;
                 //int dec = strtol(value, NULL, 10);
                 //options->squawk = (dec / 1000) * 16*16*16 + (dec / 100 % 10) * 16*16 + (dec / 10 % 10) * 16 + (dec % 10);
@@ -1284,30 +1288,30 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
             }
         } else {
             // handle parameters WITHOUT associated value
-            if (byteMatch0(option, "json")) {
+            if (byteMatchStrict(option, "json")) {
                 // this is the default
-            } else if (byteMatch0(option, "jv2")) {
+            } else if (byteMatchStrict(option, "jv2")) {
                 options->jamesv2 = 1;
-            } else if (byteMatch0(option, "zstd")) {
+            } else if (byteMatchStrict(option, "zstd")) {
                 options->zstd = 1;
-            } else if (byteMatch0(option, "bincraft")) {
+            } else if (byteMatchStrict(option, "bincraft")) {
                 options->binCraft = 1;
-            } else if (byteMatch0(option, "all")) {
+            } else if (byteMatchStrict(option, "all")) {
                 options->all = 1;
-            } else if (byteMatch0(option, "all_with_pos")) {
+            } else if (byteMatchStrict(option, "all_with_pos")) {
                 options->all_with_pos = 1;
-            } else if (byteMatch0(option, "filter_with_pos")) {
+            } else if (byteMatchStrict(option, "filter_with_pos")) {
                 options->filter_with_pos = 1;
-            } else if (byteMatch0(option, "filter_mil")) {
+            } else if (byteMatchStrict(option, "filter_mil")) {
                 options->filter_dbFlag = 1;
                 options->filter_mil = 1;
-            } else if (byteMatch0(option, "filter_interesting")) {
+            } else if (byteMatchStrict(option, "filter_interesting")) {
                 options->filter_dbFlag = 1;
                 options->filter_interesting = 1;
-            } else if (byteMatch0(option, "filter_pia")) {
+            } else if (byteMatchStrict(option, "filter_pia")) {
                 options->filter_dbFlag = 1;
                 options->filter_pia = 1;
-            } else if (byteMatch0(option, "filter_ladd")) {
+            } else if (byteMatchStrict(option, "filter_ladd")) {
                 options->filter_dbFlag = 1;
                 options->filter_ladd = 1;
             } else {
@@ -1520,12 +1524,12 @@ static void apiReadRequest(struct apiCon *con, struct apiThread *thread) {
         return;
     }
 
-    // set end padding to zeros for byteMatch (memcmp) use without regrets
+    // set end padding to zeros for byteMatchStart and byteMatch (memcmp) use without regrets
     memset(req_end, 0, end_pad);
 
-    int isGET = byteMatch(req_start, "GET");
+    int isGET = byteMatchStart(req_start, "GET");
     char *minor_version = protocol + litLen("HTTP/1.");
-    if (!byteMatch(protocol, "HTTP/1.") || !((*minor_version == '0') || (*minor_version == '1'))) {
+    if (!byteMatchStart(protocol, "HTTP/1.") || !((*minor_version == '0') || (*minor_version == '1'))) {
         send505(con->fd, con->keepalive);
         apiResetCon(con, thread);
         return;
@@ -1546,7 +1550,7 @@ static void apiReadRequest(struct apiCon *con, struct apiThread *thread) {
     while (hl < req_end && (eol = memchr(hl, '\n', req_end - hl))) {
         *eol = '\0';
 
-        if (byteMatch(hl, "connection")) {
+        if (byteMatchStart(hl, "connection")) {
             if (strstr(hl, "close")) {
                 con->keepalive = 0;
             } else if (con->keepalive || strstr(hl, "keep-alive")) {
@@ -1572,7 +1576,7 @@ static void apiReadRequest(struct apiCon *con, struct apiThread *thread) {
     }
 
     char *status = protocol - litLen("?status ");
-    if (status > req_start && byteMatch(status, "?status ")) {
+    if (status > req_start && byteMatchStart(status, "?status ")) {
         if (Modes.exitSoon) {
             send503(con->fd, con->keepalive);
         } else {
@@ -1892,6 +1896,14 @@ void apiBufferInit() {
         buffer->callsignHash = cmalloc(API_BUCKETS * sizeof(struct apiEntry*));
     }
     apiUpdate(); // run an initial apiUpdate
+
+    Modes.apiBufferInitDone++;
+    if (Modes.apiBufferInitDone != 1) {
+        fprintf(stderr, "FATAL: buffer init call fail %d\n", Modes.apiBufferInitDone);
+        setExit(2);
+        return;
+    }
+
     threadCreate(&Threads.apiUpdate, NULL, apiUpdateEntryPoint, NULL);
 }
 
@@ -1913,6 +1925,11 @@ void apiBufferCleanup() {
 }
 
 void apiInit() {
+    if (Modes.apiBufferInitDone != 1) {
+        fprintf(stderr, "FATAL: buffer init call fail %d\n", Modes.apiBufferInitDone);
+        setExit(2);
+        return;
+    }
     Modes.apiService.descr = "API output";
     serviceListen(&Modes.apiService, Modes.net_bind_address, Modes.net_output_api_ports, -1);
     fprintf(stderr, "\n");
@@ -1937,7 +1954,11 @@ void apiInit() {
         con->events = EPOLLIN | EPOLLEXCLUSIVE;
     }
 
-    Modes.api_fds_per_thread = Modes.max_fds * 7 / 8 / Modes.apiThreadCount;
+    Modes.api_fds_per_thread = imin(Modes.max_fds_api / Modes.apiThreadCount, Modes.apiThreadCount * 4096);
+    if (Modes.api_fds_per_thread < 1) {
+        Modes.api_fds_per_thread = 1;
+        fprintf(stderr, "WARNING: Setting Modes.api_fds_per_thread = 1 because it was %d\n", Modes.api_fds_per_thread);
+    }
     //fprintf(stderr, "Modes.api_fds_per_thread: %d\n", Modes.api_fds_per_thread);
     for (int i = 0; i < Modes.apiThreadCount; i++) {
         Modes.apiThread[i].index = i;

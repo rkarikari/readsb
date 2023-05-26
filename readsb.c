@@ -51,6 +51,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <sched.h>
 #include "readsb.h"
 #include "help.h"
 
@@ -80,20 +81,16 @@ void setExit(int arg) {
     ssize_t res = write(Modes.exitSoonEventfd, &one, sizeof(one));
     MODES_NOTUSED(res);
 }
-static void sigintHandler(int dummy) {
-    MODES_NOTUSED(dummy);
+
+static void exitHandler(int sig) {
     setExit(1);
 
-    signal(SIGINT, SIG_DFL); // reset signal handler - bit extra safety
-    log_with_timestamp("Caught SIGINT, shutting down...");
-}
-
-static void sigtermHandler(int dummy) {
-    MODES_NOTUSED(dummy);
-    setExit(1);
-
-    signal(SIGTERM, SIG_DFL); // reset signal handler - bit extra safety
-    log_with_timestamp("Caught SIGTERM, shutting down...");
+    char *sigX = NULL;
+    if (sig == SIGTERM) { sigX = "SIGTERM"; }
+    if (sig == SIGINT) { sigX = "SIGINT"; }
+    if (sig == SIGQUIT) { sigX = "SIGQUIT"; }
+    if (sig == SIGHUP) { sigX = "SIGHUP"; }
+    log_with_timestamp("Caught %s, shutting down...", sigX);
 }
 
 void receiverPositionChanged(float lat, float lon, float alt) {
@@ -193,8 +190,28 @@ static void configSetDefaults(void) {
     //receiverTest();
 
     struct rlimit limits;
-    getrlimit(RLIMIT_NOFILE, &limits);
-    Modes.max_fds = limits.rlim_cur;
+    int res = getrlimit(RLIMIT_NOFILE, &limits);
+    if (res != 0) {
+        fprintf(stderr, "WARNING: getrlimit(RLIMIT_NOFILE, &limits) returned the following error: \"%s\". Assuming bad limit query function, using up to 64 file descriptors \n",
+                strerror(errno));
+        Modes.max_fds = 64;
+    } else {
+        uint64_t limit = limits.rlim_cur;
+        // check limit for unreasonableness
+        if (limit < (uint64_t) 64) {
+            fprintf(stderr, "WARNING: getrlimit(RLIMIT_NOFILE, &limits) returned less than 64 fds for readsb to work with. Assuming bad limit query function, using up to 64 file descriptors. Fix RLIMIT!\n");
+            Modes.max_fds = 64;
+        } else if (limits.rlim_cur == RLIM_INFINITY) {
+            Modes.max_fds = INT32_MAX;
+        } else if (limit > (uint64_t) INT32_MAX) {
+            fprintf(stderr, "WARNING: getrlimit(RLIMIT_NOFILE, &limits) returned more than INT32_MAX ... This is just weird.\n");
+            Modes.max_fds = INT32_MAX;
+        } else {
+            Modes.max_fds = (int) limit;
+        }
+    }
+    Modes.max_fds -= 32; // reserve some fds for things we don't account for later like json writing.
+                         // this is an high estimate ... if ppl run out of fds for other stuff they should up rlimit
 
     Modes.sdr_buf_size = 16 * 16 * 1024;
 
@@ -209,6 +226,10 @@ static void configSetDefaults(void) {
     Modes.messageRateMult = 1.0f;
 
     Modes.apiShutdownDelay = 0 * SECONDS;
+
+    // default this on
+    Modes.enableAcasCsv = 1;
+    Modes.enableAcasJson = 1;
 }
 //
 //=========================================================================
@@ -331,6 +352,15 @@ int priorityTasksPending() {
 //
 
 void priorityTasksRun() {
+    if (0) {
+        int64_t now = mstime();
+        time_t nowTime = floor(now / 1000.0);
+        struct tm local;
+        gmtime_r(&nowTime, &local);
+        char timebuf[512];
+        strftime(timebuf, 128, "%T", &local);
+        printf("priorityTasksRun: utcTime: %s.%03lld epoch: %.3f\n", timebuf, (long long) now % 1000, now / 1000.0);
+    }
     pthread_mutex_lock(&Modes.hungTimerMutex);
     startWatch(&Modes.hungTimer1);
     pthread_mutex_unlock(&Modes.hungTimerMutex);
@@ -353,7 +383,7 @@ void priorityTasksRun() {
 
     static int64_t last_periodic_mono;
     int64_t periodic_interval = mono - last_periodic_mono;
-    if (periodic_interval > 5 * SECONDS && last_periodic_mono && !(Modes.syntethic_now_suppress_errors && Modes.synthetic_now)) {
+    if (periodic_interval > 5 * SECONDS && periodic_interval < 9999 * HOURS && last_periodic_mono && !(Modes.syntethic_now_suppress_errors && Modes.synthetic_now)) {
         fprintf(stderr, "<3> priorityTasksRun didn't run for %.1f seconds!\n", periodic_interval / 1000.0);
     }
     last_periodic_mono = mono;
@@ -383,7 +413,7 @@ void priorityTasksRun() {
         traceDelete();
 
         int64_t interval = mono - Modes.next_remove_stale;
-        if (interval > 5 * SECONDS && Modes.next_remove_stale && !(Modes.syntethic_now_suppress_errors && Modes.synthetic_now)) {
+        if (interval > 5 * SECONDS && interval < 9999 * HOURS && Modes.next_remove_stale && !(Modes.syntethic_now_suppress_errors && Modes.synthetic_now)) {
             fprintf(stderr, "<3> removeStale didn't run for %.1f seconds!\n", interval / 1000.0);
         }
 
@@ -756,6 +786,7 @@ static void *decodeEntryPoint(void *arg) {
             struct timespec start_time;
 
             // in case we're not waiting in backgroundTasks and priorityTasks doesn't have a chance to schedule
+            mono = mono_milli_seconds();
             if (mono > Modes.next_remove_stale + 5 * SECONDS) {
                 threadTimedWait(&Threads.decode, &ts, 1);
             }
@@ -836,8 +867,13 @@ static void *decodeEntryPoint(void *arg) {
                  */
                 threadTimedWait(&Threads.decode, &ts, 80);
             }
-            if (mono > Modes.next_remove_stale + 5 * SECONDS) {
-                threadTimedWait(&Threads.decode, &ts, 1);
+            mono = mono_milli_seconds();
+            // if removeStale is late by REMOVE_STALE_INTERVAL, force it to run
+            if (mono > Modes.next_remove_stale + REMOVE_STALE_INTERVAL) {
+                //fprintf(stderr, "%.3f >? %3.f\n", mono / 1000.0, (Modes.next_remove_stale + REMOVE_STALE_INTERVAL)/ 1000.0);
+                pthread_mutex_unlock(&Threads.decode.mutex);
+                priorityTasksRun();
+                pthread_mutex_lock(&Threads.decode.mutex);
             }
         }
         sdrCancel();
@@ -1142,7 +1178,7 @@ static void backgroundTasks(int64_t now) {
 
     static int64_t next_flip = 0;
     if (now >= next_flip) {
-        icaoFilterExpire(now);
+        icaoFilterExpire();
         next_flip = now + MODES_ICAO_FILTER_TTL;
     }
 
@@ -1238,24 +1274,45 @@ static int make_net_connector(char *arg) {
     }
     struct net_connector *con = &Modes.net_connectors[Modes.net_connectors_count++];
     memset(con, 0x0, sizeof(struct net_connector));
-    char *connect_string = strdup(arg);
+    con->connect_string = strdup(arg);
 
     int maxTokens = 128;
     char* token[maxTokens];
-    tokenize(&connect_string, ",", token, maxTokens);
+    tokenize(&con->connect_string, ",", token, maxTokens);
 
-    int k = 0;
-    con->address = con->address0 = token[k++];
-    con->port = con->port0 = token[k++];
-    con->protocol = token[k++];
+    int m = 0;
+    for(int k = 0; k < 128 && token[k]; k++) {
 
-    if (token[k] && strcmp(token[k], "silent_fail") == 0) {
-        k++;
-        con->silent_fail = 1;
+        if (strcmp(token[k], "silent_fail") == 0) {
+            con->silent_fail = 1;
+            continue; // don't increase m counter
+        }
+
+        if (strncmp(token[k], "uuid=", 5) == 0) {
+            con->uuid = token[k] + 5;
+            //fprintf(stderr, "con->uuid: %s\n", con->uuid);
+            continue; // don't increase m counter
+        }
+
+
+        if (m == 0) {
+            con->address = con->address0 = token[k];
+        }
+        if (m == 1) {
+            con->port = con->port0 = token[k];
+        }
+        if (m == 2) {
+            con->protocol = token[k];
+        }
+        if (m == 3) {
+            con->address1 = token[k];
+        }
+        if (m == 4) {
+            con->port1 = token[k];
+        }
+
+        m++;
     }
-
-    con->address1 = token[k++];
-    con->port1 = token[k++];
 
 
     if (pthread_mutex_init(&con->mutex, NULL)) {
@@ -1404,6 +1461,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
         case OptForwardMlat:
             Modes.forward_mlat = 1;
+            break;
+        case OptForwardMlatSbs:
+            Modes.forward_mlat_sbs = 1;
             break;
         case OptOnlyAddr:
             Modes.onlyaddr = 1;
@@ -1729,7 +1789,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                     }
                 }
                 if (strcasecmp(token[0], "apiThreads") == 0) {
-                    Modes.apiThreadCount = atoi(token[1]);
+                    if (token[1]) {
+                        Modes.apiThreadCount = atoi(token[1]);
+                    }
                 }
                 if (strcasecmp(token[0], "accept_synthetic") == 0) {
                     Modes.dump_accept_synthetic_now = 1;
@@ -1748,6 +1810,18 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                 }
                 if (strcasecmp(token[0], "incrementId") == 0) {
                     Modes.incrementId = 1;
+                }
+                if (strcasecmp(token[0], "omitGlobeFiles") == 0) {
+                    Modes.omitGlobeFiles = 1;
+                }
+                if (strcasecmp(token[0], "disableAcasCsv") == 0) {
+                    Modes.enableAcasCsv = 0;
+                }
+                if (strcasecmp(token[0], "disableAcasJson") == 0) {
+                    Modes.enableAcasJson = 0;
+                }
+                if (strcasecmp(token[0], "provokeSegfault") == 0) {
+                    Modes.debug_provoke_segfault = 1;
                 }
             }
             break;
@@ -1813,8 +1887,6 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                         break;
                     case 'd': Modes.debug_no_discard = 1;
                         break;
-                    case 'Z': Modes.debug_provoke_segfault = 1;
-                        break;
                     case 'y': Modes.debug_position_timing = 1;
                         break;
 
@@ -1849,10 +1921,22 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case OptPlutoUri:
         case OptPlutoNetwork:
 #endif
-        case OptDeviceType:
+            if (Modes.sdr_type == SDR_NONE) {
+                fprintf(stderr, "ERROR: SDR / device type specific options must be specified AFTER the --device-type xyz parameter.\n");
+                return ARGP_ERR_UNKNOWN;
+            }
             /* Forward interface option to the specific device handler */
-            if (sdrHandleOption(key, arg) == false)
-                return 1;
+            if (sdrHandleOption(key, arg) == false) {
+                fprintf(stderr, "ERROR: Unknown SDR specific option / Mismatch between option and specified device type.\n");
+                return ARGP_ERR_UNKNOWN;
+            }
+            break;
+        case OptDeviceType:
+            // Select device type
+            if (sdrHandleOption(key, arg) == false) {
+                fprintf(stderr, "ERROR: Unknown device type:%s\n", arg);
+                return ARGP_ERR_UNKNOWN;
+            }
             break;
         case ARGP_KEY_ARG:
             return ARGP_ERR_UNKNOWN;
@@ -1920,6 +2004,7 @@ int parseCommandLine(int argc, char **argv) {
     struct argp argp = {options, parse_opt, args_doc, doc, NULL, NULL, NULL};
 
     if (argp_parse(&argp, argc, argv, ARGP_NO_EXIT, 0, 0)) {
+        fprintf(stderr, "Error parsing the given command line parameters, check readsb --usage and readsb --help for valid parameters.\n");
         print_commandline(argc, argv);
         cleanup_and_exit(1);
     }
@@ -2087,6 +2172,14 @@ static void configAfterParse() {
     } else {
         Modes.net_only = 0;
     }
+
+    if (Modes.api) {
+        Modes.max_fds_api = Modes.max_fds / 2;
+        Modes.max_fds_net = Modes.max_fds / 2;
+    } else {
+        Modes.max_fds_api = 0;
+        Modes.max_fds_net = Modes.max_fds;
+    }
 }
 
 static void notask_save_blob(uint32_t blob) {
@@ -2153,6 +2246,14 @@ static void miscStuff(int64_t now) {
         if (now > nextOutlineWrite) {
             free(writeJsonToFile(Modes.json_dir, "outline.json", generateOutlineJson()).buffer);
             nextOutlineWrite = now + 15 * SECONDS;
+        }
+
+        if (!Modes.state_only_on_exit) {
+            static int64_t nextRangeDirsWrite;
+            if (now > nextRangeDirsWrite) {
+                nextRangeDirsWrite = now + 5 * MINUTES;
+                writeRangeDirs();
+            }
         }
     }
 
@@ -2268,12 +2369,48 @@ static void *miscEntryPoint(void *arg) {
 
     pthread_exit(NULL);
 }
+static void _sigaction_range(struct sigaction *sa, int first, int last) {
+    int sig;
+    for (sig = first; sig <= last; ++sig) {
+        if (sigaction(sig, sa, NULL)) {
+            /* SIGKILL/SIGSTOP trigger EINVAL.  Ignore by default. */
+            if (errno != EINVAL) {
+                fprintf(stderr, "sigaction(%s[%i]) failed: %s\n", strsignal(sig), sig, strerror(errno));
+            }
+        }
+    }
+}
+static void configureSignals() {
+    // signal handling stuff
+    // block all signals while we maniplate signal handlers
+    sigset_t mask;
+    sigfillset(&mask);
+    sigprocmask(SIG_SETMASK, &mask, NULL);
+    // ignore all signals, then reenable some
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigfillset(&sa.sa_mask);
+    sa.sa_handler = SIG_IGN;
+
+    _sigaction_range(&sa, 1, 31);
+
+    signal(SIGINT, exitHandler);
+    signal(SIGTERM, exitHandler);
+    signal(SIGQUIT, exitHandler);
+    signal(SIGHUP, exitHandler);
+
+    // unblock signals now that signals are configured
+    sigemptyset(&mask);
+    sigprocmask(SIG_SETMASK, &mask, NULL);
+}
 
 //
 //=========================================================================
 //
 
 int main(int argc, char **argv) {
+
+    configureSignals();
 
     if (0) {
         unlink("test.gz");
@@ -2295,12 +2432,9 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    // signal handling stuff
     Modes.exitNowEventfd = eventfd(0, EFD_NONBLOCK);
     Modes.exitSoonEventfd = eventfd(0, EFD_NONBLOCK);
-    signal(SIGINT, sigintHandler);
-    signal(SIGTERM, sigtermHandler);
-    signal(SIGUSR1, SIG_IGN);
+
 
     if (argc >= 2 && !strcmp(argv[1], "--structs")) {
         fprintf(stderr, VERSION_STRING"\n");
@@ -2400,14 +2534,14 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (Modes.json_globe_index) {
+    if (Modes.json_globe_index && !Modes.omitGlobeFiles) {
         threadCreate(&Threads.globeBin, NULL, globeBinEntryPoint, NULL);
     }
 
     if (Modes.json_dir) {
         threadCreate(&Threads.json, NULL, jsonEntryPoint, NULL);
 
-        if (Modes.json_globe_index) {
+        if (Modes.json_globe_index && !Modes.omitGlobeFiles) {
             // globe_xxxx.json
             threadCreate(&Threads.globeJson, NULL, globeJsonEntryPoint, NULL);
         }
@@ -2419,6 +2553,14 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_REALTIME, &ts);
 
     threadCreate(&Threads.upkeep, NULL, upkeepEntryPoint, NULL);
+
+
+    if (Modes.debug_provoke_segfault) {
+        msleep(666);
+        fprintf(stderr, "devel=provokeSegfault -> provoking SEGFAULT now!\n");
+        int *a = NULL;
+        *a = 0;
+    }
 
     int mainEpfd = my_epoll_create(&Modes.exitSoonEventfd);
     struct epoll_event *events = NULL;
@@ -2475,18 +2617,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "<3>FATAL: removeStale() interval %.1f seconds! Trying for an orderly shutdown as well as possible!\n", (double) elapsed2 / SECONDS);
                 setExit(2);
                 break;
-            }
-        }
-
-        if (Modes.debug_provoke_segfault) {
-            static int64_t next_fail;
-            int64_t now = mstime();
-            if (next_fail == 0) {
-                next_fail = now + 15 * SECONDS;
-            } else if (now > next_fail) {
-                fprintf(stderr, "debug=Z -> provoking SEGFAULT now!\n");
-                int *a = NULL;
-                *a = 0;
             }
         }
     }
@@ -2565,7 +2695,6 @@ int main(int argc, char **argv) {
     // writes state if Modes.state_dir is set
     Modes.free_aircraft = 1;
     writeInternalState();
-
 
     if (Modes.exit != 1) {
         log_with_timestamp("Abnormal exit.");

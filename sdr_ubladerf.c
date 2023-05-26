@@ -60,6 +60,8 @@ bool ubladeRFHandleOption(int argc, char *argv) {
                 uBladeRF.lpf_bandwidth = atoi(argv);
             }
             break;
+        default:
+            return false;
     }
     return true;
 }
@@ -524,9 +526,8 @@ out:
 
 void ubladeRFClose() {
     if (uBladeRF.converter) {
-        cleanup_converter(uBladeRF.converter_state);
+        cleanup_converter(&uBladeRF.converter_state);
         uBladeRF.converter = NULL;
-        uBladeRF.converter_state = NULL;
     }
 
     if (uBladeRF.device) {

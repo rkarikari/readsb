@@ -192,28 +192,56 @@ void printACASInfoShort(uint32_t addr, unsigned char *MV, struct aircraft *a, st
 
 void logACASInfoShort(uint32_t addr, unsigned char *bytes, struct aircraft *a, struct modesMessage *mm, int64_t now) {
 
-    static int64_t lastLogTimestamp1, lastLogTimestamp2;
-    static uint32_t lastLogAddr1, lastLogAddr2;
-    static char lastLogBytes1[7], lastLogBytes2[7];
     bool rat = getbit(bytes, 27); // clear of conflict / RA terminated
-    int deduplicationInterval = rat ? 5000 : 200; // in ms
-    if (lastLogAddr1 == addr && (int64_t) now - lastLogTimestamp1 < deduplicationInterval && !memcmp(lastLogBytes1, bytes, 7)) {
-        return;
+    int64_t dedupMaxIval = 5000;
+    int64_t deduplicationInterval = rat ? dedupMaxIval : 300; // in ms
+
+    #define DEDUPSIZE 1024
+    #define LOGBYTES 7
+
+    static char lastLogBytes[DEDUPSIZE][LOGBYTES];
+    static uint32_t lastLogAddr[DEDUPSIZE];
+    static int64_t lastLogTimestamp[DEDUPSIZE];
+
+    static int nextIndex;
+
+    for (int k = 0; k < nextIndex; k++) {
+        if (lastLogAddr[k] == addr && now - lastLogTimestamp[k] < deduplicationInterval && !memcmp(lastLogBytes[k], bytes, 7)) {
+            //fprintf(stderr, ".");
+            return;
+        }
     }
-    if (lastLogAddr2 == addr && (int64_t) now - lastLogTimestamp2 < deduplicationInterval && !memcmp(lastLogBytes2, bytes, 7)) {
-        return;
+    //fprintf(stderr, ",\n");
+
+    lastLogAddr[nextIndex] = addr;
+    lastLogTimestamp[nextIndex] = now;
+    memcpy(lastLogBytes[nextIndex], bytes, 7);
+
+    nextIndex++;
+
+    int moveIndex = 0;
+    for (; moveIndex < nextIndex && now - lastLogTimestamp[moveIndex] > dedupMaxIval; moveIndex++) {
     }
 
-    if (addr == lastLogAddr1 || (addr != lastLogAddr2 && lastLogTimestamp2 > lastLogTimestamp1)) {
-        lastLogAddr1 = addr;
-        lastLogTimestamp1 = now;
-        memcpy(lastLogBytes1, bytes, 7);
-    } else {
-        lastLogAddr2 = addr;
-        lastLogTimestamp2 = now;
-        memcpy(lastLogBytes2, bytes, 7);
+    if (nextIndex == DEDUPSIZE) {
+        moveIndex = DEDUPSIZE * 1 / 8;
     }
 
+    if (moveIndex > DEDUPSIZE / 128) {
+        //int oldSize = nextIndex;
+        int newSize = nextIndex - moveIndex;
+
+        //fprintf(stderr, "old size: %d, move index: %d, new size: %d\n", oldSize, moveIndex, newSize);
+        memmove(lastLogBytes[0], lastLogBytes[moveIndex], newSize * LOGBYTES);
+        memmove(&lastLogAddr[0], &lastLogAddr[moveIndex], newSize * sizeof lastLogAddr[0]);
+        memmove(&lastLogTimestamp[0], &lastLogTimestamp[moveIndex], newSize * sizeof(lastLogTimestamp[0]));
+
+        nextIndex = newSize;
+    }
+
+
+    #undef DEDUPSIZE
+    #undef LOGBYTES
 
     if (Modes.acasFD1 > 0) {
 
@@ -241,7 +269,7 @@ void logACASInfoShort(uint32_t addr, unsigned char *bytes, struct aircraft *a, s
         if (p - buf >= (int) sizeof(buf) - 1) {
             fprintf(stderr, "logACAS json buffer insufficient!\n");
         } else {
-            check_write(Modes.acasFD2, buf, p - buf, "acas.csv");
+            check_write(Modes.acasFD2, buf, p - buf, "acas.json");
         }
     }
 }
@@ -994,7 +1022,7 @@ struct char_buffer generateAircraftBin(threadpool_buffer_t *pbuffer) {
 
     struct craftArray *ca = &Modes.aircraftActive;
     ca_lock_read(ca);
-    size_t alloc = 4096 + ca->len * sizeof(struct binCraft);
+    size_t alloc = 4096 + (ca->len + 2) * sizeof(struct binCraft);
 
     char *buf = check_grow_threadpool_buffer_t(pbuffer, alloc);
     char *p = buf;
@@ -1045,7 +1073,7 @@ struct char_buffer generateAircraftBin(threadpool_buffer_t *pbuffer) {
     memWrite(p, Modes.binCraftVersion);
 
     if (p - buf > (int) elementSize)
-        fprintf(stderr, "buffer overrun aircrafBin\n");
+        fprintf(stderr, "aircraftBin: header too large oos4tooT\n");
 
     p = buf + elementSize;
 
@@ -1058,7 +1086,7 @@ struct char_buffer generateAircraftBin(threadpool_buffer_t *pbuffer) {
         }
         // check if we have enough space
         if ((p + 2 * sizeof(struct binCraft)) >= end) {
-            fprintf(stderr, "buffer overrun aircraftBin\n");
+            fprintf(stderr, "increase buffer size: iXok9ieD\n");
             break;
         }
 
@@ -1969,8 +1997,9 @@ open:
 
     if (gzip) {
         gzFile gzfp = gzdopen(fd, "wb");
-        if (!gzfp)
+        if (!gzfp) {
             goto error_1;
+        }
 
         int gBufSize = 128 * 1024;
         if (len < 16 * 1024) {

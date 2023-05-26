@@ -150,6 +150,8 @@ bool rtlsdrHandleOption(int argc, char *argv) {
         case OptRtlSdrPpm:
             RTLSDR.ppm_error = atoi(argv);
             break;
+        default:
+            return false;
     }
     return true;
 }
@@ -401,9 +403,8 @@ void rtlsdrClose() {
     }
 
     if (RTLSDR.converter) {
-        cleanup_converter(RTLSDR.converter_state);
+        cleanup_converter(&RTLSDR.converter_state);
         RTLSDR.converter = NULL;
-        RTLSDR.converter_state = NULL;
     }
 
     free(RTLSDR.bounce_buffer);
