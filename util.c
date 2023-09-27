@@ -53,9 +53,6 @@
 
 #include "readsb.h"
 
-#include <stdlib.h>
-#include <sys/time.h>
-
 int64_t mstime(void) {
     if (Modes.synthetic_now)
         return Modes.synthetic_now;
@@ -215,7 +212,8 @@ int64_t lapWatch(struct timespec *start_time) {
 unsigned int get_seed() {
     struct timespec time;
     clock_gettime(CLOCK_REALTIME, &time);
-    return (time.tv_sec ^ time.tv_nsec ^ (getpid() << 16) ^ (uintptr_t) pthread_self());
+    unsigned int seed = (uint64_t) time.tv_sec ^ (uint64_t) time.tv_nsec ^ (((uint64_t) getpid()) << 16) ^ (((uint64_t) (uintptr_t) pthread_self()) << 10);
+    return seed;
 }
 
 // increment target by increment in ms, if result is in the past, set target to now.
@@ -269,7 +267,7 @@ void threadCreate(threadT *thread, const pthread_attr_t *attr, void *(*start_rou
 }
 static void threadDestroy(threadT *thread) {
     // if the join didn't work, don't clean up
-    if (!thread->joined) {
+    if (!thread->joined || thread->joinFailed) {
         fprintf(stderr, "<3>FATAL: thread %s could not be joined, calling abort()!\n", thread->name);
         abort();
     }
@@ -297,7 +295,7 @@ void threadTimedWait(threadT *thread, struct timespec *ts, int64_t increment) {
 void threadSignalJoin(threadT *thread) {
     if (thread->joined)
         return;
-    int timeout = Modes.joinTimeout;
+    int64_t timeout = Modes.joinTimeout;
     int err = 0;
     while ((err = pthread_tryjoin_np(thread->pthread, NULL)) && timeout-- > 0) {
         pthread_cond_signal(&thread->cond);
