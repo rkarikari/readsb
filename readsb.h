@@ -256,7 +256,8 @@ typedef enum {
     COMMB_ACAS_RA,
     COMMB_VERTICAL_INTENT,
     COMMB_TRACK_TURN,
-    COMMB_HEADING_SPEED
+    COMMB_HEADING_SPEED,
+    COMMB_METEOROLOGICAL_ROUTINE
 } commb_format_t;
 
 typedef enum
@@ -342,6 +343,7 @@ typedef enum {
  */
 #define MAGIC_MLAT_TIMESTAMP 0xFF004D4C4154LL
 #define MAGIC_UAT_TIMESTAMP  0xFF004D4C4155LL
+#define MAGIC_NOFORWARD_TIMESTAMP  0xFF004D4C4160LL
 
 #define MAGIC_ANY_TIMESTAMP  0xFFFFFFFFFFFFULL
 
@@ -440,7 +442,7 @@ static inline void *malloc_or_exit(size_t alignment, size_t size, const char *fi
 
 typedef enum
 {
-    SDR_NONE = 0, SDR_IFILE, SDR_RTLSDR, SDR_BLADERF, SDR_MICROBLADERF, SDR_MODESBEAST, SDR_PLUTOSDR, SDR_GNS
+    SDR_NONE = 0, SDR_IFILE, SDR_RTLSDR, SDR_BLADERF, SDR_MICROBLADERF, SDR_HACKRF, SDR_MODESBEAST, SDR_PLUTOSDR, SDR_SOAPYSDR, SDR_GNS
 } sdr_type_t;
 
 // Structure representing one magnitude buffer
@@ -587,6 +589,7 @@ struct _Modes
     struct net_writer sbs_out_jaero; // SBS-format output
     struct net_writer sbs_out_prio; // SBS-format output
     struct net_writer json_out; // SBS-format output
+    struct net_writer asterix_out; // Asterix output
     struct net_writer feedmap_out; // SBS-format output
     struct net_writer vrs_out; // SBS-format output
     struct net_writer fatsv_out; // FATSV-format output
@@ -662,6 +665,8 @@ struct _Modes
     int8_t debug_provoke_segfault;
     int8_t debug_position_timing;
     int8_t debug_lastStatus;
+    int8_t debug_gps;
+    int8_t debug_planefinder;
     int8_t incrementId;
     int8_t omitGlobeFiles;
     int8_t enableAcasCsv;
@@ -679,6 +684,8 @@ struct _Modes
     int8_t netIngest;
     int8_t forward_mlat; // forward beast mlat messages to beast output ports
     int8_t forward_mlat_sbs; // forward mlat messages to sbs output ports
+    int8_t beast_forward_noforward;
+    int8_t beast_set_noforward_timestamp;
     int8_t quiet; // Suppress stdout
     int8_t interactive; // Interactive mode
     int8_t stats_range_histo; // Collect/show a range histogram?
@@ -694,6 +701,7 @@ struct _Modes
     int8_t jsonLongtype;
     int8_t viewadsb;
     int8_t sbsReduce; // apply beast reduce logic to SBS messages
+    int8_t asterixReduce; // apply beast reduce logic to SBS messages
 
     int position_persistence; // Maximum number of consecutive implausible positions from global CPR to invalidate a known position
     int json_reliable;
@@ -701,8 +709,8 @@ struct _Modes
     uint32_t filterDF; // Only show messages with certain DF types
     uint32_t filterDFbitset; // Bitset, Only show messages with these DF types
 
-    uint32_t trackExpireJaero;
-    uint32_t trackExpireMax;
+    int64_t trackExpireJaero;
+    int64_t trackExpireMax;
 
     uint32_t cpr_focus;
     uint32_t trace_focus;
@@ -718,13 +726,13 @@ struct _Modes
     int64_t doubleBeastReduceIntervalUntil;
     float beast_reduce_filter_distance;
     float beast_reduce_filter_altitude;
-    int32_t net_connector_delay;
-    int32_t net_connector_delay_min;
+    int64_t net_connector_delay;
+    int64_t net_connector_delay_min;
     int64_t next_reconnect_callback;
     int64_t last_connector_fail;
     int32_t net_heartbeat_interval; // TCP heartbeat interval (milliseconds)
     int32_t net_output_flush_interval; // Maximum interval (in milliseconds) between outputwrites
-    int64_t net_output_next_flush;
+    int32_t net_output_flush_interval_beast_reduce; // Maximum interval (in milliseconds) between outputwrites
     double fUserLat; // Users receiver/antenna lat/lon needed for initial surface location
     double fUserLon; // Users receiver/antenna lat/lon needed for initial surface location
     double maxRange; // Absolute maximum decoding range, in *metres*
@@ -737,6 +745,7 @@ struct _Modes
     char *db_file;
     char *net_output_raw_ports; // List of raw output TCP ports
     char *net_input_raw_ports; // List of raw input TCP ports
+    char *net_input_planefinder_ports; // List of planefinder input TCP ports
     char *net_output_sbs_ports; // List of SBS output TCP ports
     char *net_input_sbs_ports; // List of SBS input TCP ports
     char *net_output_jaero_ports; // jaero SBS output ports
@@ -744,6 +753,8 @@ struct _Modes
     char *net_input_beast_ports; // List of Beast input TCP ports
     char *net_output_beast_ports; // List of Beast output TCP ports
     char *net_output_beast_reduce_ports; // List of Beast output TCP ports
+    char *net_output_asterix_ports; // List of Asterix output TCP ports
+    char *net_input_asterix_ports; // List of Asterix input TCP ports
     char *net_output_json_ports;
     char *net_output_api_ports;
     char *garbage_ports;
@@ -771,6 +782,7 @@ struct _Modes
     int8_t dump_reduce; // only dump beast that would be sent out according to reduce_interval
     int8_t state_only_on_exit;
     int8_t free_aircraft;
+    int64_t state_write_interval;
     char *prom_file;
     int64_t heatmap_current_interval;
     int64_t heatmap_interval; // don't change data type
@@ -873,6 +885,7 @@ struct modesMessage
     addrtype_t addrtype; // address format / source
     int8_t remote; // If set this message is from a remote station
     int8_t sbs_in; // Signifies this message is coming from basestation input
+    int8_t address_reliable;
     int8_t sbsMsgType; // SBS message type
     int8_t reduce_forward; // forward this message for reduced beast output
     int8_t garbage; // from garbage receiver
@@ -944,6 +957,12 @@ struct modesMessage
     bool alt_q_bit;
     bool acas_ra_valid;
     bool geom_alt_derived;
+    bool wind_valid;
+    bool oat_valid;
+    bool static_pressure_valid;
+    bool turbulence_valid;
+    bool humidity_valid;
+    bool met_source_valid;
 
     bool squawk_emergency_valid;
     bool squawk_emergency;
@@ -999,6 +1018,15 @@ struct modesMessage
     double distance_traveled; // set in speed_check, zero is invalid
     double receiver_distance; // distance to receiver
     float calculated_track; // set in speed_check, -1 is invalid
+
+    // meteorological
+    int wind_speed;
+    float wind_direction;
+    float oat;
+    int static_pressure;
+    int turbulence;
+    float humidity;
+    int met_source;
 
     commb_format_t commb_format; // Inferred format of a comm-b message
 
@@ -1141,6 +1169,7 @@ enum {
     OptPromFile,
     OptGlobeHistoryDir,
     OptStateDir,
+    OptStateInterval,
     OptStateOnlyOnExit,
     OptHeatmap,
     OptHeatmapDir,
@@ -1163,6 +1192,9 @@ enum {
     OptNetJaeroInPorts,
     OptNetBiPorts,
     OptNetBoPorts,
+    OptNetAsterixInPorts,
+    OptNetAsterixOutPorts,
+    OptNetAsterixReduce,
     OptNetBeastReducePorts,
     OptNetBeastReduceInterval,
     OptNetBeastReduceFilterAlt,
@@ -1177,8 +1209,8 @@ enum {
     OptApiShutdownDelay,
     OptTar1090UseApi,
     OptNetRoSize,
-    OptNetRoRate,
-    OptNetRoIntervall,
+    OptNetRoInterval,
+    OptNetRoIntervalBeastReduce,
     OptNetConnector,
     OptNetConnectorDelay,
     OptNetHeartbeat,
@@ -1207,8 +1239,14 @@ enum {
     OptBladeFpgaDir,
     OptBladeDecim,
     OptBladeBw,
+    OptHackRfGainEnable,
+    OptHackRfVgaGain,
     OptPlutoUri,
     OptPlutoNetwork,
+    OptSoapyAntenna,
+    OptSoapyBandwith,
+    OptSoapyEnableAgc,
+    OptSoapyGainElement,
 };
 
 

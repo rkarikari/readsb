@@ -1645,6 +1645,8 @@ static const char *commb_format_to_string(commb_format_t format) {
         return "BDS5,0 Track and turn report";
     case COMMB_HEADING_SPEED:
         return "BDS6,0 Heading and speed report";
+    case COMMB_METEOROLOGICAL_ROUTINE:
+        return "BDS4,4 Meteorological routine air report";
     default:
         return "unknown format";
     }
@@ -1874,6 +1876,8 @@ void displayModesMessage(struct modesMessage *mm) {
         printf("This is a synthetic MLAT message.\n");
     else if (mm->timestamp == MAGIC_UAT_TIMESTAMP)
         printf("This is a synthetic UAT message.\n");
+    else if (mm->timestamp == MAGIC_NOFORWARD_TIMESTAMP)
+        printf("This is a no_forward message.\n");
     else
         printf("receiverTime: %27.2fus\n", mm->timestamp / 12.0);
 

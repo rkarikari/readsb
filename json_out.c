@@ -994,7 +994,7 @@ int includeAircraftJson(int64_t now, struct aircraft *a) {
         fprintf(stderr, "includeAircraftJson: got NULL pointer\n");
         return 0;
     }
-    if (a->messages < 2) {
+    if (a->messages < 2 && a->last_message_crc_fixed) {
         return 0;
     }
 
@@ -1011,6 +1011,9 @@ int includeAircraftJson(int64_t now, struct aircraft *a) {
     if (now < a->seen + TRACK_EXPIRE) {
         return 1;
     }
+    if (a->addrtype == ADDR_JAERO && now < a->seen + Modes.trackExpireJaero) {
+        return 1;
+    }
 
     return 0;
 }
@@ -1022,7 +1025,7 @@ struct char_buffer generateAircraftBin(threadpool_buffer_t *pbuffer) {
 
     struct craftArray *ca = &Modes.aircraftActive;
     ca_lock_read(ca);
-    size_t alloc = 4096 + (ca->len + 2) * sizeof(struct binCraft);
+    size_t alloc = 4096 + (ca->len + 64) * sizeof(struct binCraft);
 
     char *buf = check_grow_threadpool_buffer_t(pbuffer, alloc);
     char *p = buf;
@@ -2075,9 +2078,6 @@ struct char_buffer generateVRS(int part, int n_parts, int reduced_data) {
 
     for (int j = part_start; j < part_start + part_len; j++) {
         for (a = Modes.aircraft[j]; a; a = a->next) {
-            if (a->messages < 2) { // basic filter for bad decodes
-                continue;
-            }
             if (now > a->seen + 10 * SECONDS) // don't include stale aircraft in the JSON
                 continue;
 
