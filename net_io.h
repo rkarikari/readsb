@@ -43,6 +43,7 @@ typedef enum
     READ_MODE_BEAST,
     READ_MODE_BEAST_COMMAND,
     READ_MODE_ASCII,
+    READ_MODE_ASTERIX,
     READ_MODE_PLANEFINDER
 } read_mode_t;
 
@@ -187,6 +188,8 @@ struct net_writer
     int connections; // number of active clients
     struct net_service *service; // owning service
     int64_t lastWrite; // time of last write to clients
+    int64_t nextFlush;
+    int64_t flushInterval;
     uint64_t lastReceiverId;
     int noTimestamps;
 };
@@ -226,6 +229,5 @@ typedef union __packed {
 void netUseMessage(struct modesMessage *mm);
 void netDrainMessageBuffers();
 struct modesMessage *netGetMM(struct messageBuffer *buf);
-
 
 #endif
