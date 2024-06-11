@@ -803,7 +803,7 @@ static inline void apiGenerateJson(struct apiBuffer *buffer, int64_t now) {
     char *end = buffer->json + alloc;
 
     for (int i = 0; i < buffer->len; i++) {
-        if ((p + 2000) >= end) {
+        if ((p + 16 * 1024) >= end) {
             int used = p - buffer->json;
             alloc *= 2;
             buffer->json = (char *) realloc(buffer->json, alloc);
@@ -1859,21 +1859,48 @@ static void *apiUpdateEntryPoint(void *arg) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     struct timespec cpu_timer;
+
     while (!Modes.exit) {
 
-        //struct timespec watch;
-        //startWatch(&watch);
+        struct timespec watch;
+
+        int debug = 0;
+        if (debug) {
+            fprintTimePrecise(stderr, mstime());
+            fprintf(stderr, " apiUpdate\n");
+
+            startWatch(&watch);
+        }
 
         start_cpu_timing(&cpu_timer);
 
-        apiUpdate();
+        int ac_count = apiUpdate();
 
         end_cpu_timing(&cpu_timer, &Modes.stats_current.api_update_cpu);
 
-        //int64_t elapsed = stopWatch(&watch);
-        //fprintf(stderr, "api req took: %.5f s, got %d aircraft!\n", elapsed / 1000.0, n);
 
-        threadTimedWait(&Threads.apiUpdate, &ts, Modes.json_interval);
+        if (0 && debug) {
+            int64_t elapsed = stopWatch(&watch);
+            fprintTimePrecise(stderr, mstime());
+            fprintf(stderr, " apiUpdate took: %.3f s for %d aircraft!\n", elapsed / 1000.0, ac_count);
+        }
+
+        int64_t now = mstime();
+
+        int64_t ival = Modes.json_interval;
+        int64_t remaining = ival - (now % ival);
+
+        if (remaining < 5) {
+            remaining += ival;
+        }
+
+        int64_t waitStarted = now;
+        int64_t elapsed = 0;
+        do {
+            threadTimedWait(&Threads.apiUpdate, &ts, remaining - elapsed);
+            //fprintf(stderr, ".");
+            elapsed = mstime() - waitStarted;
+        } while (!Modes.exit && elapsed < remaining);
     }
     pthread_mutex_unlock(&Threads.apiUpdate.mutex);
     return NULL;
@@ -1995,7 +2022,7 @@ struct char_buffer apiGenerateAircraftJson(threadpool_buffer_t *pbuffer) {
 
     struct apiBuffer *buffer = &Modes.apiBuffer[flip];
 
-    ssize_t alloc = buffer->jsonLen + 2048;
+    ssize_t alloc = buffer->jsonLen + 8 * 1024;
 
     char *buf = check_grow_threadpool_buffer_t(pbuffer, alloc);
     char *p = buf;

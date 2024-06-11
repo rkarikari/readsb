@@ -542,7 +542,7 @@ static int speed_check(struct aircraft *a, datasource_t source, double lat, doub
         }
     }
 
-    if (track_diff > 70.0f) {
+    if (track_diff > 70.0f && speed > 10) {
         mm->trackUnreliable = +1;
     } else if (track_diff > -1) {
         mm->trackUnreliable = -1;
@@ -557,7 +557,7 @@ static int speed_check(struct aircraft *a, datasource_t source, double lat, doub
         speed = surface ? 120 : 900; // guess
     }
 
-    if (speed > 1 && track_diff > -1 && a->trackUnreliable < 8) {
+    if (speed > 10 && track_diff > -1 && a->trackUnreliable < 8) {
         track_bonus = speed * (90.0f - track_diff) / 90.0f;
         track_bonus *= (surface ? 0.9f : 1.0f) * (1.0f - track_age / track_max_age);
         if (a->gs < 10) {
@@ -1006,6 +1006,29 @@ static void setPosition(struct aircraft *a, struct modesMessage *mm, int64_t now
         mm->client->positionCounter++;
     }
 
+#if defined(PRINT_UUIDS)
+    {
+        int64_t oldestTime = now;
+        int64_t overwriteOlder = now - 60 * SECONDS;
+        idTime *overwrite = &a->recentReceiverIds[0];
+        for (int i = 0; i < RECENT_RECEIVER_IDS; i++) {
+            idTime *entry = &a->recentReceiverIds[i];
+            if (entry->id == mm->receiverId) {
+                overwrite = entry;
+                break;
+            }
+            // if we already found an entry to overwrite (older than 60 seconds)
+            // then look no further for an entry to overwrite
+            if (oldestTime > overwriteOlder && entry->time < oldestTime) {
+                oldestTime = entry->time;
+                overwrite = entry;
+            }
+        }
+        overwrite->id = mm->receiverId;
+        overwrite->time = now;
+    }
+#endif
+
     if (mm->duplicate) {
         Modes.stats_current.pos_duplicate++;
         return;
@@ -1077,25 +1100,6 @@ static void setPosition(struct aircraft *a, struct modesMessage *mm, int64_t now
             a->receiverCount = div;
         }
     }
-#if defined(PRINT_UUIDS)
-    {
-        int done = 0;
-        for (int i = 0; i < RECENT_RECEIVER_IDS; i++) {
-            idTime *entry = &a->recentReceiverIds[i];
-            if (entry->id == mm->receiverId) {
-                entry->time = now;
-                done = 1;
-                break;
-            }
-        }
-        if (!done) {
-            a->recentReceiverIdsNext = (a->recentReceiverIdsNext + 1) % RECENT_RECEIVER_IDS;
-            idTime *entry = &a->recentReceiverIds[a->recentReceiverIdsNext];
-            entry->id = mm->receiverId;
-            entry->time = now;
-        }
-    }
-#endif
 
     if (Modes.netReceiverId && posReliable(a)) {
 
@@ -1202,7 +1206,14 @@ static void setPosition(struct aircraft *a, struct modesMessage *mm, int64_t now
             a->receiver_distance = mm->receiver_distance;
             a->receiver_direction = bearing(Modes.fUserLat, Modes.fUserLon, a->lat, a->lon);
 
-            if (mm->source == SOURCE_ADSB || mm->source == SOURCE_ADSR) {
+            // nac_p >= 2 accuracy better than 4 nmi
+            // decoded_rc less than 5 * nmi
+            if (mm->source == SOURCE_ADSB
+                    && trackDataValid(&a->nac_p_valid) && a->nac_p >= 2
+                    && mm->decoded_rc != 0 && mm->decoded_rc < 5 * 1852
+               ) {
+                update_range_histogram(a, now);
+            } else if (mm->source == SOURCE_ADSR) {
                 update_range_histogram(a, now);
             }
 
@@ -1216,6 +1227,20 @@ static void setPosition(struct aircraft *a, struct modesMessage *mm, int64_t now
     if (0 && a->addr == Modes.cpr_focus) {
         fprintf(stderr, "%06x: reliability odd: %3.1f even: %3.1f status: %d\n", a->addr, a->pos_reliable_odd, a->pos_reliable_even, posReliable(a));
     }
+}
+
+static int64_t cpr_global_airborne_max_elapsed(int64_t now, struct aircraft *a) {
+    if (trackDataAge(now, &a->gs_valid) > 20 * SECONDS) {
+        return 10 * SECONDS;
+    }
+    int speed = imax((int64_t) a->gs, 1);
+    // max time for 500 knots gs
+    int64_t ref = 19 * SECONDS; // empirically tested
+    int64_t ival = (ref * 500) / speed;
+    // never return more than 30 seconds
+    ival = imin(30 * SECONDS, ival);
+    //fprintf(stderr, "%lld\n", (long long) ival);
+    return ival;
 }
 
 static void updatePosition(struct aircraft *a, struct modesMessage *mm, int64_t now) {
@@ -1243,8 +1268,8 @@ static void updatePosition(struct aircraft *a, struct modesMessage *mm, int64_t 
         if (mm->source != SOURCE_MLAT)
             Modes.stats_current.cpr_airborne++;
 
-        // Airborne: 10 seconds
-        max_elapsed = 10000;
+        // Airborne: determine depending on speed, fallback 10 seconds
+        max_elapsed = cpr_global_airborne_max_elapsed(now, a);
     }
 
     // If we have enough recent data, try global CPR
@@ -1816,7 +1841,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm) {
 
     if (mm->msgtype == DFTYPE_MODEAC) {
         // Mode A/C, just count it (we ignore SPI)
-        modeAC_count[modeAToIndex(mm->squawk)]++;
+        modeAC_count[modeAToIndex(mm->squawkHex)]++;
         res = NULL;
         goto exit;
     }
@@ -2020,22 +2045,22 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm) {
         uint32_t oldsquawk = a->squawk;
 
         int changeTentative = 0;
-        if (a->squawkTentative != mm->squawk && now - a->seen < 15 * SECONDS && will_accept_data(&a->squawk_valid, mm->source, mm, a)) {
+        if (a->squawkTentative != mm->squawkHex && now - a->seen < 15 * SECONDS && will_accept_data(&a->squawk_valid, mm->source, mm, a)) {
             a->squawk_valid.next_reduce_forward = now + currentReduceInterval(now);
             mm->reduce_forward = 1;
             PPforward;
             changeTentative = 1;
         }
         if (
-                (mm->source == SOURCE_JAERO || (a->squawkTentative == mm->squawk && now - a->squawkTentativeChanged > 750))
+                (mm->source == SOURCE_JAERO || (a->squawkTentative == mm->squawkHex && now - a->squawkTentativeChanged > 750))
                 && accept_data(&a->squawk_valid, mm->source, mm, a, REDUCE_RARE)) {
-            if (mm->squawk != a->squawk) {
+            if (mm->squawkHex != a->squawk) {
                 a->modeA_hit = 0;
             }
-            a->squawk = mm->squawk;
+            a->squawk = mm->squawkHex;
         }
         if (changeTentative) {
-            a->squawkTentative = mm->squawk;
+            a->squawkTentative = mm->squawkHex;
             a->squawkTentativeChanged = now;
         }
 
@@ -2052,7 +2077,7 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm) {
                             a->addr,
                             mm->msgtype,
                             a->squawk,
-                            mm->squawk,
+                            mm->squawkHex,
                             uuid);
                 }
             } else {
@@ -2298,6 +2323,11 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm) {
     }
 
 
+    if (Modes.beast_reduce_optimize_mlat) {
+        if (mm->cpr_valid || a->position_valid.source < SOURCE_ADSR) {
+            mm->reduce_forward = 1;
+        }
+    }
 
     if (mm->acas_ra_valid) {
 
@@ -2646,7 +2676,10 @@ exit:
             || (Modes.show_only != BADDR && (mm->addr == Modes.show_only || mm->maybe_addr == Modes.show_only))
             || (Modes.debug_7700 && ac && ac->squawk == 0x7700 && trackDataValid(&ac->squawk_valid))
        ) {
-        displayModesMessage(mm);
+        // filter messages with unwanted DF types (sbs_in are unknown DF type, filter them all, this is arbitrary but no one cares anyway)
+        if (!(Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1 << mm->msgtype))))) {
+            displayModesMessage(mm);
+        }
     }
 
     if (Modes.debug_bogus) {
@@ -3660,9 +3693,6 @@ static void incrementReliable(struct aircraft *a, struct modesMessage *mm, int64
     float increment = 1.0f;
     if (mm->pos_receiver_range_exceeded) {
         increment = 0.25f;
-    }
-    if (mm->source == SOURCE_SBS) {
-        increment = 0.5f;
     }
 
     if (odd)
