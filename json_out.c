@@ -994,16 +994,17 @@ int includeAircraftJson(int64_t now, struct aircraft *a) {
         fprintf(stderr, "includeAircraftJson: got NULL pointer\n");
         return 0;
     }
-    if (a->messages < 2 && a->last_message_crc_fixed) {
+
+    // include all aircraft with valid position
+    if (a->pos_reliable_valid.source != SOURCE_INVALID) {
+        return 1;
+    }
+
+    if (a->messages < 2 && a->addrtype != ADDR_JAERO && a->addrtype != ADDR_OTHER) {
         return 0;
     }
 
     if (a->nogpsCounter >= NOGPS_SHOW && now - a->seenAdsbReliable < NOGPS_DWELL) {
-        return 1;
-    }
-
-    // include all aircraft with valid position
-    if (a->pos_reliable_valid.source != SOURCE_INVALID) {
         return 1;
     }
 
@@ -1636,7 +1637,6 @@ static void checkTraceCache(struct aircraft *a, traceBuffer tb, int64_t now) {
 
     cache->firstRecentCache = firstRecentCache;
 
-    int sprintCount = 0;
     if (0 && a->addr == TRACE_FOCUS) {
         fprintf(stderr, "%06x sprintCache: %d points firstRecent starting %d (firstRecentCache starting %d, max %d)\n", a->addr, tb.len - firstRecent, firstRecent, firstRecentCache, Modes.traceCachePoints);
     }
@@ -1700,7 +1700,6 @@ static void checkTraceCache(struct aircraft *a, traceBuffer tb, int64_t now) {
             break;
         }
 
-        sprintCount++;
 
         entry->ts = state->timestamp;
         entry->offset = stringStart - cache->json;
@@ -1878,6 +1877,11 @@ struct char_buffer generateReceiverJson() {
                     "\"lon\": %.6f",
                     Modes.fUserLat, Modes.fUserLon); // exact location
         }
+        if (Modes.fUserAlt > -1e6) {
+            p = safe_snprintf(p, end,
+                    ", \"alt_m_amsl\": %.0f",
+                    Modes.fUserAlt);
+        }
     }
 
     p = safe_snprintf(p, end, ", \"jaeroTimeout\": %.1f", ((double) Modes.trackExpireJaero) / (60 * SECONDS));
@@ -1911,8 +1915,12 @@ struct char_buffer generateReceiverJson() {
     if (Modes.tar1090_use_api) {
         p = safe_snprintf(p, end, ", \"reapi\": true");
     }
+
     p = safe_snprintf(p, end, ", \"binCraft\": true");
-    p = safe_snprintf(p, end, ", \"zstd\": true");
+
+    if (Modes.enable_zstd) {
+        p = safe_snprintf(p, end, ", \"zstd\": true");
+    }
 
     if (Modes.outline_json) {
         p = safe_snprintf(p, end, ", \"outlineJson\": true");
@@ -2084,6 +2092,11 @@ struct char_buffer generateVRS(int part, int n_parts, int reduced_data) {
             // For now, suppress non-ICAO addresses
             if (a->addr & MODES_NON_ICAO_ADDRESS)
                 continue;
+
+            // also enforce same criteria as for aircraft.json
+            if (!includeAircraftJson(now, a)) {
+                continue;
+            }
 
 
             if ((p + 2048) >= end) {
