@@ -10,6 +10,12 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 see the LICENSE file for details
 
 
+## how to install Automaticaclly
+```
+sudo bash -c "$(wget -O - https://github.com/wiedehopf/adsb-scripts/raw/master/readsb-install.sh)"
+sudo reboot
+```
+
 ## how to install / build
 
 I'd recommend this script to automatically install it:
