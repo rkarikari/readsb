@@ -12,7 +12,7 @@ see the LICENSE file for details
 
 ## how to install Automaticaclly
 ```
-sudo bash -c "$(wget -O - https://github.com/wiedehopf/adsb-scripts/raw/master/readsb-install.sh)"
+sudo bash -c "$(wget -O - https://github.com/rkarikari/adsb-scripts/raw/master/readsb-install.sh)"
 sudo reboot
 ```
 
